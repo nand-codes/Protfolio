@@ -3,6 +3,7 @@
 @theme {
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", monospace;
+  --font-apple: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --color-accent: #06b6d4;
   --color-accent-secondary: #8b5cf6;
   --color-surface: #0a0a0f;

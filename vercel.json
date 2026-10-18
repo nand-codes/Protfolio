@@ -6,7 +6,8 @@
   "installCommand": "npm install",
   "rewrites": [
     { "source": "/track", "destination": "/track/index.html" },
-    { "source": "/track/", "destination": "/track/index.html" }
+    { "source": "/track/", "destination": "/track/index.html" },
+    { "source": "/((?!api|track|assets|favicon\\.svg|_redirects).*)", "destination": "/index.html" }
   ],
   "headers": [
     {
