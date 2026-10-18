@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { createToken } from "./auth.js";
 
 type UnlockResult = {
   status: number;
-  body: { ok: true } | { error: string };
+  body: { ok: true; token: string } | { error: string };
 };
 
 export function unlockResponse(password: unknown): UnlockResult {
@@ -21,7 +22,8 @@ export function unlockResponse(password: unknown): UnlockResult {
   const given = createHash("sha256").update(password).digest();
   const actual = createHash("sha256").update(expected).digest();
 
-  return timingSafeEqual(given, actual)
-    ? { status: 200, body: { ok: true } }
-    : { status: 401, body: { error: "Incorrect password" } };
+  if (!timingSafeEqual(given, actual)) {
+    return { status: 401, body: { error: "Incorrect password" } };
+  }
+  return { status: 200, body: { ok: true, token: createToken()! } };
 }

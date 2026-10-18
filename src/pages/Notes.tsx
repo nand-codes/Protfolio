@@ -1,6 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, Search, SquarePen, Trash2 } from "lucide-react";
+import {
+  ChevronLeft,
+  Loader2,
+  Lock,
+  Search,
+  SquarePen,
+  Trash2,
+} from "lucide-react";
+import { clearToken, getToken, requestToken } from "../lib/session";
 
 interface Note {
   id: string;
@@ -9,19 +17,98 @@ interface Note {
   updatedAt: number;
 }
 
-const STORAGE_KEY = "nk_notes";
-const DAY = 86_400_000;
+type SaveState = "idle" | "saving" | "saved" | "error";
+type StorageMode = "cloud" | "device";
 
-function loadNotes(): Note[] {
+// Holds notes that haven't reached the server yet (or all notes when no cloud storage is configured).
+const BACKUP_KEY = "nk_notes";
+const DAY = 86_400_000;
+const SAVE_DELAY_MS = 700;
+
+const accent = "text-[#d9a400] dark:text-[#ffd60a]";
+const fullScreen =
+  "font-apple h-dvh flex flex-col items-center justify-center gap-4 px-6 text-center bg-white text-[#1d1d1f] dark:bg-[#1e1e1e] dark:text-[#f5f5f7] antialiased";
+
+function loadBackup(): Note[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(BACKUP_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
   }
 }
 
+function mergeNotes(server: Note[], local: Note[]) {
+  const byId = new Map(server.map((n) => [n.id, n]));
+  let changed = false;
+  for (const note of local) {
+    const existing = byId.get(note.id);
+    if (!existing || note.updatedAt > existing.updatedAt) {
+      byId.set(note.id, note);
+      changed = true;
+    }
+  }
+  return { notes: [...byId.values()], changed };
+}
+
+const newestId = (notes: Note[]) =>
+  [...notes].sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id ?? null;
+
 const isEmpty = (note: Note) => !note.title.trim() && !note.body.trim();
+
+function NotesLock({ onUnlock }: { onUnlock: (token: string) => void }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!password || checking) return;
+    setChecking(true);
+    setError(null);
+    try {
+      onUnlock(await requestToken(password));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className={fullScreen}>
+      <Lock size={40} className={accent} />
+      <div>
+        <h1 className="text-[22px] font-semibold">Notes are locked</h1>
+        <p className="mt-1 text-[14px] text-[#86868b]">
+          Enter the password to view your notes.
+        </p>
+      </div>
+      <form onSubmit={submit} className="w-full max-w-xs flex flex-col gap-3">
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Password"
+          autoFocus
+          autoComplete="current-password"
+          className="px-3 py-2 rounded-lg bg-black/[0.06] dark:bg-white/10 text-[15px] outline-none focus:ring-2 focus:ring-[#ffd60a]"
+        />
+        {error && <p className="text-[13px] text-red-500">{error}</p>}
+        <button
+          type="submit"
+          disabled={!password || checking}
+          className="flex items-center justify-center gap-2 py-2 rounded-lg bg-[#ffd60a] text-[#1d1d1f] text-[15px] font-semibold disabled:opacity-40 hover:brightness-95 transition"
+        >
+          {checking && <Loader2 size={16} className="animate-spin" />}
+          Unlock
+        </button>
+      </form>
+      <Link to="/" className={`text-[14px] ${accent} hover:opacity-80`}>
+        Back to portfolio
+      </Link>
+    </div>
+  );
+}
 
 function groupLabel(ts: number, now: Date) {
   const startOfToday = new Date(
@@ -62,19 +149,146 @@ function previewText(body: string) {
 }
 
 export default function Notes() {
-  const [notes, setNotes] = useState<Note[]>(loadNotes);
-  const [selectedId, setSelectedId] = useState<string | null>(
-    () =>
-      [...notes].sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id ?? null,
-  );
+  const [token, setToken] = useState<string | null>(getToken);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [mode, setMode] = useState<StorageMode>("cloud");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [query, setQuery] = useState("");
   const [showEditorOnMobile, setShowEditorOnMobile] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const notesRef = useRef(notes);
+  const skipSaveRef = useRef(true);
+  const pendingRef = useRef(false);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+    notesRef.current = notes;
   }, [notes]);
+
+  const lockOut = useCallback(() => {
+    clearToken();
+    setToken(null);
+    setLoaded(false);
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    setLoadError(null);
+
+    (async () => {
+      try {
+        const res = await fetch("/api/notes", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (res.status === 401) {
+          lockOut();
+          return;
+        }
+
+        let serverNotes: Note[] = [];
+        let nextMode: StorageMode = "cloud";
+        if (res.status === 503 && data.code === "storage_unconfigured") {
+          nextMode = "device";
+        } else if (!res.ok) {
+          throw new Error(data.error || `Couldn't load notes (${res.status})`);
+        } else {
+          serverNotes = data.notes ?? [];
+        }
+
+        const { notes: merged, changed } = mergeNotes(serverNotes, loadBackup());
+        skipSaveRef.current = nextMode === "device" || !changed;
+        setMode(nextMode);
+        setNotes(merged);
+        setSelectedId(newestId(merged));
+        setLoaded(true);
+      } catch (err) {
+        if (!cancelled) {
+          setLoadError(
+            err instanceof Error ? err.message : "Couldn't load notes",
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, reloadKey, lockOut]);
+
+  const persist = useCallback(
+    async (toSave: Note[], keepalive = false) => {
+      pendingRef.current = false;
+      const payload = toSave.filter((n) => !isEmpty(n));
+      const backup = () =>
+        localStorage.setItem(BACKUP_KEY, JSON.stringify(payload));
+
+      if (mode === "device") {
+        backup();
+        setSaveState("saved");
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/notes", {
+          method: "PUT",
+          keepalive,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ notes: payload }),
+        });
+        if (res.status === 401) {
+          backup();
+          lockOut();
+          return;
+        }
+        if (!res.ok) throw new Error(`Save failed (${res.status})`);
+        localStorage.removeItem(BACKUP_KEY);
+        setSaveState("saved");
+      } catch {
+        pendingRef.current = true;
+        backup();
+        setSaveState("error");
+      }
+    },
+    [mode, token, lockOut],
+  );
+
+  useEffect(() => {
+    if (!loaded) return;
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false;
+      return;
+    }
+    pendingRef.current = true;
+    setSaveState("saving");
+    const timer = window.setTimeout(() => void persist(notes), SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [notes, loaded, persist]);
+
+  useEffect(() => {
+    const flush = () => {
+      if (pendingRef.current) void persist(notesRef.current, true);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      flush();
+    };
+  }, [persist]);
 
   useEffect(() => {
     document.title = "Notes";
@@ -149,8 +363,40 @@ export default function Notes() {
     setShowEditorOnMobile(false);
   };
 
-  const accent = "text-[#d9a400] dark:text-[#ffd60a]";
   const iconButton = `p-2 rounded-md ${accent} hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 transition-colors`;
+
+  if (!token) return <NotesLock onUnlock={setToken} />;
+
+  if (loadError) {
+    return (
+      <div className={fullScreen}>
+        <p className="text-[15px] text-[#86868b]">{loadError}</p>
+        <button
+          onClick={() => setReloadKey((k) => k + 1)}
+          className={`text-[15px] font-medium ${accent} hover:opacity-80`}
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  if (!loaded) {
+    return (
+      <div className={fullScreen}>
+        <Loader2 size={24} className="animate-spin text-[#86868b]" />
+      </div>
+    );
+  }
+
+  const statusText =
+    mode === "device"
+      ? "Saved on this device only"
+      : saveState === "saving"
+        ? "Saving…"
+        : saveState === "error"
+          ? "Couldn't save — kept on this device"
+          : "Saved to cloud";
 
   return (
     <div className="font-apple h-dvh flex bg-white text-[#1d1d1f] dark:bg-[#1e1e1e] dark:text-[#f5f5f7] selection:bg-[#ffd60a]/40 antialiased">
@@ -236,6 +482,10 @@ export default function Notes() {
 
         <p className="py-2 text-center text-[12px] text-[#86868b] border-t border-black/5 dark:border-white/5">
           {notes.length} {notes.length === 1 ? "Note" : "Notes"}
+          {" · "}
+          <span className={saveState === "error" ? "text-red-500" : ""}>
+            {statusText}
+          </span>
         </p>
       </aside>
 

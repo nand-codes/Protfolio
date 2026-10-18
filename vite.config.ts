@@ -8,6 +8,7 @@ import {
   type ChatMessage,
 } from "./server/chatHandler.js";
 import { unlockResponse } from "./server/unlockHandler.js";
+import { notesResponse } from "./server/notesStore.js";
 
 const SERVER_ENV_KEYS = [
   "AI_API_KEY",
@@ -15,6 +16,10 @@ const SERVER_ENV_KEYS = [
   "AI_API_BASE_URL",
   "AI_MODEL",
   "CONTENT_PASSWORD",
+  "UPSTASH_REDIS_REST_URL",
+  "UPSTASH_REDIS_REST_TOKEN",
+  "KV_REST_API_URL",
+  "KV_REST_API_TOKEN",
 ];
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -133,6 +138,36 @@ function unlockApiPlugin(): Plugin {
   };
 }
 
+function notesApiPlugin(): Plugin {
+  return {
+    name: "notes-api",
+    configureServer(server) {
+      server.middlewares.use(
+        "/api/notes",
+        async (req: IncomingMessage, res: ServerResponse) => {
+          let payload: unknown = null;
+          if (req.method === "PUT") {
+            try {
+              payload = JSON.parse(await readBody(req));
+            } catch {
+              payload = null;
+            }
+          }
+
+          const { status, body } = await notesResponse(
+            req.method,
+            req.headers.authorization,
+            payload,
+          );
+          res.statusCode = status;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(body));
+        },
+      );
+    },
+  };
+}
+
 function trackRoutePlugin(): Plugin {
   const rewrite = (
     req: { url?: string },
@@ -173,6 +208,7 @@ export default defineConfig(({ mode }) => {
       trackRoutePlugin(),
       chatApiPlugin(),
       unlockApiPlugin(),
+      notesApiPlugin(),
     ],
   };
 });

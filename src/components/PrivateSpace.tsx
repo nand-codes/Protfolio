@@ -11,8 +11,7 @@ import {
   StickyNote,
   ArrowRight,
 } from "lucide-react";
-
-const STORAGE_KEY = "nk_space_unlocked";
+import { clearToken, getToken, requestToken } from "../lib/session";
 
 const destinations = [
   {
@@ -40,9 +39,7 @@ const destinations = [
 
 export default function PrivateSpace() {
   const [open, setOpen] = useState(false);
-  const [unlocked, setUnlocked] = useState(
-    () => sessionStorage.getItem(STORAGE_KEY) === "1",
-  );
+  const [unlocked, setUnlocked] = useState(() => getToken() !== null);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -54,15 +51,7 @@ export default function PrivateSpace() {
     setChecking(true);
     setError(null);
     try {
-      const res = await fetch("/api/unlock", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Incorrect password");
-
-      sessionStorage.setItem(STORAGE_KEY, "1");
+      await requestToken(password);
       setUnlocked(true);
       setPassword("");
     } catch (err) {
@@ -73,7 +62,7 @@ export default function PrivateSpace() {
   };
 
   const lock = () => {
-    sessionStorage.removeItem(STORAGE_KEY);
+    clearToken();
     setUnlocked(false);
   };
 
